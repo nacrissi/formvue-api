@@ -1,15 +1,21 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// Check for required environment variables
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
-  console.error('Missing required environment variables');
+// Lazy initialization to avoid module-load crashes
+let supabase: SupabaseClient | null = null;
+
+function getSupabase(): SupabaseClient {
+  if (!supabase) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('Missing required environment variables: SUPABASE_URL and SUPABASE_SERVICE_KEY');
+    }
+    supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+  }
+  return supabase;
 }
-
-const supabase = createClient(
-  process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_KEY || ''
-);
 
 // Tier limits for enforcement
 const TIER_LIMITS = {
@@ -35,8 +41,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    const db = getSupabase();
+
     // Get or create license record
-    let { data: license, error } = await supabase
+    let { data: license, error } = await db
       .from('formvue_licenses')
       .select('*')
       .eq('email', email)
@@ -44,7 +52,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (error && error.code === 'PGRST116') {
       // No record found - create free tier license
-      const { data: newLicense, error: insertError } = await supabase
+      const { data: newLicense, error: insertError } = await db
         .from('formvue_licenses')
         .insert({ email, tier: 'free' })
         .select()

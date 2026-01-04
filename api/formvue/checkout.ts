@@ -1,18 +1,33 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+// Lazy initialization to avoid module-load crashes
+let stripe: Stripe | null = null;
+let supabase: SupabaseClient | null = null;
 
-// Stripe Price IDs (set after creating products)
-const PRICE_IDS = {
-  pro: process.env.STRIPE_PRICE_PRO || 'price_XXXXX',
-  team: process.env.STRIPE_PRICE_TEAM || 'price_XXXXX'
-};
+function getStripe(): Stripe {
+  if (!stripe) {
+    if (!process.env.STRIPE_SECRET_KEY) {
+      throw new Error('Missing STRIPE_SECRET_KEY');
+    }
+    stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  }
+  return stripe;
+}
+
+function getSupabase(): SupabaseClient {
+  if (!supabase) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('Missing required environment variables');
+    }
+    supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+  }
+  return supabase;
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS preflight
@@ -31,8 +46,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    const stripeClient = getStripe();
+    const db = getSupabase();
+
+    // Stripe Price IDs
+    const PRICE_IDS = {
+      pro: process.env.STRIPE_PRICE_PRO || 'price_XXXXX',
+      team: process.env.STRIPE_PRICE_TEAM || 'price_XXXXX'
+    };
+
     // Check if customer already exists
-    let { data: license } = await supabase
+    let { data: license } = await db
       .from('formvue_licenses')
       .select('stripe_customer_id')
       .eq('email', email)
@@ -42,14 +66,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Create Stripe customer if needed
     if (!customerId) {
-      const customer = await stripe.customers.create({
+      const customer = await stripeClient.customers.create({
         email,
         metadata: { source: 'formvue' }
       });
       customerId = customer.id;
 
       // Save customer ID
-      await supabase
+      await db
         .from('formvue_licenses')
         .upsert({
           email,
@@ -60,7 +84,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // Create checkout session
-    const session = await stripe.checkout.sessions.create({
+    const session = await stripeClient.checkout.sessions.create({
       customer: customerId,
       payment_method_types: ['card'],
       line_items: [{

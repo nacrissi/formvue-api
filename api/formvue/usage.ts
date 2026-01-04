@@ -1,10 +1,21 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+// Lazy initialization to avoid module-load crashes
+let supabase: SupabaseClient | null = null;
+
+function getSupabase(): SupabaseClient {
+  if (!supabase) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('Missing required environment variables: SUPABASE_URL and SUPABASE_SERVICE_KEY');
+    }
+    supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+  }
+  return supabase;
+}
 
 type EventType = 'dashboard_created' | 'form_connected' | 'responses_processed' | 'export_pdf' | 'share_link';
 
@@ -25,8 +36,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    const db = getSupabase();
+
     // Log the usage event
-    const { error: eventError } = await supabase
+    const { error: eventError } = await db
       .from('formvue_usage_events')
       .insert({
         email,
@@ -40,7 +53,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Update aggregate counts on license record
     const updateField = getUpdateField(event as EventType);
     if (updateField) {
-      const { error: updateError } = await supabase.rpc('increment_usage', {
+      const { error: updateError } = await db.rpc('increment_usage', {
         user_email: email,
         field_name: updateField,
         increment_by: count
@@ -48,7 +61,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       // If RPC doesn't exist, do manual update
       if (updateError) {
-        const { data: license } = await supabase
+        const { data: license } = await db
           .from('formvue_licenses')
           .select(updateField)
           .eq('email', email)
@@ -57,7 +70,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         if (license && typeof license === 'object') {
           const licenseRecord = license as unknown as Record<string, number>;
           const currentValue = licenseRecord[updateField] || 0;
-          await supabase
+          await db
             .from('formvue_licenses')
             .update({
               [updateField]: currentValue + count,

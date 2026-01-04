@@ -1,12 +1,33 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+// Lazy initialization to avoid module-load crashes
+let stripe: Stripe | null = null;
+let supabase: SupabaseClient | null = null;
+
+function getStripe(): Stripe {
+  if (!stripe) {
+    if (!process.env.STRIPE_SECRET_KEY) {
+      throw new Error('Missing STRIPE_SECRET_KEY');
+    }
+    stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  }
+  return stripe;
+}
+
+function getSupabase(): SupabaseClient {
+  if (!supabase) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('Missing required environment variables');
+    }
+    supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+  }
+  return supabase;
+}
 
 // Disable body parsing for webhook signature verification
 export const config = {
@@ -28,13 +49,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const stripeClient = getStripe();
   const buf = await buffer(req);
   const sig = req.headers['stripe-signature'] as string;
 
   let event: Stripe.Event;
 
   try {
-    event = stripe.webhooks.constructEvent(
+    event = stripeClient.webhooks.constructEvent(
       buf,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET!
@@ -80,6 +102,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 }
 
 async function handleCheckoutComplete(session: Stripe.Checkout.Session) {
+  const db = getSupabase();
   const email = session.metadata?.email || session.customer_email;
   const tier = session.metadata?.tier || 'pro';
 
@@ -88,7 +111,7 @@ async function handleCheckoutComplete(session: Stripe.Checkout.Session) {
     return;
   }
 
-  await supabase
+  await db
     .from('formvue_licenses')
     .upsert({
       email,
@@ -105,10 +128,12 @@ async function handleCheckoutComplete(session: Stripe.Checkout.Session) {
 }
 
 async function handleSubscriptionUpdate(subscription: Stripe.Subscription) {
+  const stripeClient = getStripe();
+  const db = getSupabase();
   const customerId = subscription.customer as string;
 
   // Get customer email
-  const customer = await stripe.customers.retrieve(customerId);
+  const customer = await stripeClient.customers.retrieve(customerId);
   if (customer.deleted) return;
 
   const email = customer.email;
@@ -123,7 +148,7 @@ async function handleSubscriptionUpdate(subscription: Stripe.Subscription) {
     'unpaid': 'past_due'
   };
 
-  await supabase
+  await db
     .from('formvue_licenses')
     .update({
       status: statusMap[subscription.status] || 'active',
@@ -133,15 +158,17 @@ async function handleSubscriptionUpdate(subscription: Stripe.Subscription) {
 }
 
 async function handleSubscriptionCanceled(subscription: Stripe.Subscription) {
+  const stripeClient = getStripe();
+  const db = getSupabase();
   const customerId = subscription.customer as string;
-  const customer = await stripe.customers.retrieve(customerId);
+  const customer = await stripeClient.customers.retrieve(customerId);
   if (customer.deleted) return;
 
   const email = customer.email;
   if (!email) return;
 
   // Downgrade to free tier
-  await supabase
+  await db
     .from('formvue_licenses')
     .update({
       tier: 'free',
@@ -155,14 +182,16 @@ async function handleSubscriptionCanceled(subscription: Stripe.Subscription) {
 }
 
 async function handlePaymentFailed(invoice: Stripe.Invoice) {
+  const stripeClient = getStripe();
+  const db = getSupabase();
   const customerId = invoice.customer as string;
-  const customer = await stripe.customers.retrieve(customerId);
+  const customer = await stripeClient.customers.retrieve(customerId);
   if (customer.deleted) return;
 
   const email = customer.email;
   if (!email) return;
 
-  await supabase
+  await db
     .from('formvue_licenses')
     .update({
       status: 'past_due',

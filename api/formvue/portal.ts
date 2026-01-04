@@ -1,12 +1,33 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+// Lazy initialization to avoid module-load crashes
+let stripe: Stripe | null = null;
+let supabase: SupabaseClient | null = null;
+
+function getStripe(): Stripe {
+  if (!stripe) {
+    if (!process.env.STRIPE_SECRET_KEY) {
+      throw new Error('Missing STRIPE_SECRET_KEY');
+    }
+    stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  }
+  return stripe;
+}
+
+function getSupabase(): SupabaseClient {
+  if (!supabase) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('Missing required environment variables');
+    }
+    supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY
+    );
+  }
+  return supabase;
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS preflight
@@ -25,8 +46,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    const stripeClient = getStripe();
+    const db = getSupabase();
+
     // Get customer ID from license
-    const { data: license } = await supabase
+    const { data: license } = await db
       .from('formvue_licenses')
       .select('stripe_customer_id')
       .eq('email', email)
@@ -37,7 +61,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // Create portal session
-    const session = await stripe.billingPortal.sessions.create({
+    const session = await stripeClient.billingPortal.sessions.create({
       customer: license.stripe_customer_id,
       return_url: returnUrl || 'https://formvue.app/account'
     });
